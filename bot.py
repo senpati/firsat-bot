@@ -1,5 +1,6 @@
 import os
 import re
+import json
 import logging
 import requests
 from bs4 import BeautifulSoup
@@ -52,6 +53,49 @@ def extract_price(text: str) -> str | None:
     return None
 
 
+def extract_price_from_page(soup: BeautifulSoup, raw_html: str) -> str | None:
+    """Ürün sayfasından fiyatı birkaç farklı yöntemle bulmaya çalışır."""
+
+    # 1) JSON-LD yapılandırılmış veri (çoğu e-ticaret sitesi bunu kullanır)
+    for script in soup.find_all("script", type="application/ld+json"):
+        if not script.string:
+            continue
+        try:
+            data = json.loads(script.string)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        candidates = data if isinstance(data, list) else [data]
+        for item in candidates:
+            if not isinstance(item, dict):
+                continue
+            offers = item.get("offers")
+            if isinstance(offers, list):
+                offers = offers[0] if offers else None
+            if isinstance(offers, dict) and offers.get("price"):
+                try:
+                    price_val = float(str(offers["price"]).replace(",", "."))
+                    return f"{price_val:.2f} TL".replace(".00", "")
+                except ValueError:
+                    pass
+
+    # 2) Yaygın meta etiketleri
+    for attrs in (
+        {"property": "product:price:amount"},
+        {"property": "og:price:amount"},
+        {"itemprop": "price"},
+    ):
+        tag = soup.find("meta", attrs=attrs)
+        if tag and tag.get("content"):
+            return f"{tag['content']} TL"
+
+    # 3) Ham HTML içinde "₺" veya "TL" geçen ilk fiyat deseni
+    m = PRICE_REGEX.search(raw_html)
+    if m:
+        return f"{m.group(1)} {m.group(2).upper()}"
+
+    return None
+
+
 def fetch_og_data(url: str) -> dict:
     """Linkten görsel/başlık çekmeye çalışır (Open Graph meta etiketleri)."""
     headers = {
@@ -70,7 +114,7 @@ def fetch_og_data(url: str) -> dict:
         "Sec-Fetch-Mode": "navigate",
         "Sec-Fetch-Site": "none",
     }
-    result = {"image": None, "title": None, "description": None}
+    result = {"image": None, "title": None, "description": None, "price": None}
     try:
         session = requests.Session()
         # Kısa linkleri (ty.gl, bit.ly vb.) gerçek ürün linkine yönlendirmesini takip et
@@ -96,6 +140,8 @@ def fetch_og_data(url: str) -> dict:
             meta_desc = soup.find("meta", attrs={"name": "description"})
             if meta_desc and meta_desc.get("content"):
                 result["description"] = meta_desc["content"].strip()
+
+        result["price"] = extract_price_from_page(soup, resp.text)
 
         # Bazı siteler bot isteklerine genel/şablon bir açıklama döndürür.
         # Bunu tespit edip, gerçek açıklama yerine boş bırakıyoruz ki
@@ -193,13 +239,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     link = url_match.group(1)
-    price = extract_price(text)
+    price = extract_price(text)  # önce kullanıcının mesajına bak
 
     await update.message.reply_text("⏳ Ürün bilgisi ve görsel alınıyor, biraz bekle...")
 
     og_data = fetch_og_data(link)
 
-    # Fiyat mesajda yoksa, ürün sayfasının açıklamasında geçiyor olabilir
+    # Kullanıcı fiyat yazmadıysa, sayfadan otomatik çekilen fiyatı kullan
+    if not price and og_data.get("price"):
+        price = og_data["price"]
+
+    # O da yoksa açıklama metninde geçiyor olabilir, son çare olarak orayı ara
     if not price and og_data.get("description"):
         price = extract_price(og_data["description"])
 
