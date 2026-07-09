@@ -56,13 +56,27 @@ def fetch_og_data(url: str) -> dict:
     """Linkten görsel/başlık çekmeye çalışır (Open Graph meta etiketleri)."""
     headers = {
         "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-        )
+            "Mozilla/5.0 (Linux; Android 14; SM-S928B) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36"
+        ),
+        "Accept": (
+            "text/html,application/xhtml+xml,application/xml;q=0.9,"
+            "image/avif,image/webp,*/*;q=0.8"
+        ),
+        "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
     }
     result = {"image": None, "title": None, "description": None}
     try:
-        resp = requests.get(url, headers=headers, timeout=8)
+        session = requests.Session()
+        # Kısa linkleri (ty.gl, bit.ly vb.) gerçek ürün linkine yönlendirmesini takip et
+        resp = session.get(url, headers=headers, timeout=12, allow_redirects=True)
+        resp.encoding = resp.apparent_encoding  # Türkçe karakterler bozulmasın
+
         soup = BeautifulSoup(resp.text, "html.parser")
 
         og_image = soup.find("meta", property="og:image")
@@ -83,9 +97,24 @@ def fetch_og_data(url: str) -> dict:
             if meta_desc and meta_desc.get("content"):
                 result["description"] = meta_desc["content"].strip()
 
+        # Bazı siteler bot isteklerine genel/şablon bir açıklama döndürür.
+        # Bunu tespit edip, gerçek açıklama yerine boş bırakıyoruz ki
+        # kullanıcının kendi notu (varsa) veya sadece başlık kullanılsın.
+        generic_markers = ["hızlı kargo", "aynı gün kargo", "trend yolu"]
+        if result["description"] and any(
+            marker in result["description"].lower() for marker in generic_markers
+        ):
+            result["description"] = None
+
         # Ürün açıklamaları genelde çok uzun oluyor, taslağı şişirmesin diye kısaltıyoruz
         if result["description"] and len(result["description"]) > 300:
             result["description"] = result["description"][:300].rsplit(" ", 1)[0] + "..."
+
+        logger.info(
+            f"OG çekildi -> title:{bool(result['title'])} "
+            f"image:{bool(result['image'])} desc:{bool(result['description'])} "
+            f"status:{resp.status_code} final_url:{resp.url}"
+        )
     except Exception as e:
         logger.warning(f"OG verisi çekilemedi ({url}): {e}")
     return result
